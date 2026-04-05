@@ -49,13 +49,16 @@ class MarkdownRenderer:
         path = Path(file_path)
 
         try:
-            text = self.read_text_file(path)
+            text, _ = self.read_text_file_with_encoding(path)
         except OSError as exc:
             message = f"Failed to read the file: {html.escape(str(exc))}"
             return self._build_message_result(path.name, message)
 
+        return self.render_text(text, path.name)
+
+    def render_text(self, text: str, title_hint: str = "Untitled") -> RenderResult:
         if not text.strip():
-            return self._build_message_result(path.name, "This file is empty.")
+            return self._build_message_result(title_hint, "This file is empty.")
 
         md = markdown.Markdown(
             extensions=["extra", "codehilite", "toc", "sane_lists"],
@@ -74,7 +77,7 @@ class MarkdownRenderer:
 
         body_html = md.convert(text)
         safe_body = self._sanitize_html(body_html)
-        title = self.extract_title(text, path.name)
+        title = self.extract_title(text, title_hint)
         return RenderResult(
             html=self._build_html(title, safe_body),
             outline=md.toc_tokens,
@@ -83,17 +86,31 @@ class MarkdownRenderer:
 
     @staticmethod
     def read_text_file(path: Path | str) -> str:
+        return MarkdownRenderer.read_text_file_with_encoding(path)[0]
+
+    @staticmethod
+    def read_text_file_with_encoding(path: Path | str) -> tuple[str, str]:
         path = Path(path)
         for encoding in ("utf-8", "gbk"):
             try:
-                return path.read_text(encoding=encoding)
+                return path.read_text(encoding=encoding), encoding
             except UnicodeDecodeError:
                 continue
 
         try:
-            return path.read_text(encoding="utf-8", errors="ignore")
+            return path.read_text(encoding="utf-8", errors="ignore"), "utf-8"
         except OSError:
-            return path.read_text(encoding="gbk", errors="ignore")
+            return path.read_text(encoding="gbk", errors="ignore"), "gbk"
+
+    @staticmethod
+    def write_text_file(path: Path | str, text: str, encoding: str = "utf-8") -> str:
+        path = Path(path)
+        try:
+            path.write_text(text, encoding=encoding)
+            return encoding
+        except UnicodeEncodeError:
+            path.write_text(text, encoding="utf-8")
+            return "utf-8"
 
     @classmethod
     def extract_title(cls, text: str, fallback: str) -> str:

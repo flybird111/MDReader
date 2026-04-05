@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.editor_panel import MarkdownEditorPanel
 from app.file_tree import ALLOWED_SUFFIXES, FileTreePanel
 from app.markdown_renderer import MarkdownRenderer
 from app.outline_panel import OutlinePanel
@@ -78,16 +79,28 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.current_file_path = ""
+        self.current_file_encoding = "utf-8"
+        self.loaded_file_text = ""
+        self.current_view_mode = "preview"
+        self._scroll_sync_guard = False
+        self._last_split_sizes = [520, 620]
         self.renderer = MarkdownRenderer()
+        self.preview_zoom_factor = 1.0
+
+        self.preview_refresh_timer = QTimer(self)
+        self.preview_refresh_timer.setInterval(180)
+        self.preview_refresh_timer.setSingleShot(True)
+        self.preview_refresh_timer.timeout.connect(self._render_editor_contents)
 
         self.setWindowTitle("MDReader - Local Offline Markdown Reader")
-        self.resize(1440, 900)
-        self.setMinimumSize(1080, 680)
+        self.resize(1560, 940)
+        self.setMinimumSize(1180, 720)
 
         self._build_actions()
         self._build_toolbar()
         self._build_ui()
         self._apply_styles()
+        self._set_view_mode("preview")
 
         welcome = self.renderer.render_welcome()
         self.viewer.set_markdown_html(welcome.html)
@@ -97,6 +110,42 @@ class MainWindow(QMainWindow):
         self.open_folder_action = QAction("Open Folder", self)
         self.open_folder_action.setShortcut(QKeySequence("Ctrl+O"))
         self.open_folder_action.triggered.connect(self.open_folder)
+
+        self.save_action = QAction("Save", self)
+        self.save_action.setShortcut(QKeySequence.Save)
+        self.save_action.triggered.connect(self.save_current_file)
+        self.save_action.setEnabled(False)
+        self.addAction(self.save_action)
+
+        self.undo_action = QAction("Undo", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.triggered.connect(self._undo_edit)
+        self.undo_action.setEnabled(False)
+        self.addAction(self.undo_action)
+
+        self.redo_action = QAction("Redo", self)
+        self.redo_action.setShortcut(QKeySequence.Redo)
+        self.redo_action.triggered.connect(self._redo_edit)
+        self.redo_action.setEnabled(False)
+        self.addAction(self.redo_action)
+
+        self.preview_mode_action = QAction("Preview", self)
+        self.preview_mode_action.setCheckable(True)
+        self.preview_mode_action.triggered.connect(lambda checked: checked and self._set_view_mode("preview"))
+
+        self.edit_mode_action = QAction("Edit", self)
+        self.edit_mode_action.setCheckable(True)
+        self.edit_mode_action.triggered.connect(lambda checked: checked and self._set_view_mode("edit"))
+
+        self.edit_only_mode_action = QAction("Edit Only", self)
+        self.edit_only_mode_action.setCheckable(True)
+        self.edit_only_mode_action.triggered.connect(lambda checked: checked and self._set_view_mode("edit_only"))
+
+        self.view_mode_group = QActionGroup(self)
+        self.view_mode_group.setExclusive(True)
+        for action in (self.preview_mode_action, self.edit_mode_action, self.edit_only_mode_action):
+            self.view_mode_group.addAction(action)
+            action.setEnabled(False)
 
         self.find_in_document_action = QAction("Find in Document", self)
         self.find_in_document_action.setShortcut(QKeySequence.Find)
@@ -118,22 +167,20 @@ class MainWindow(QMainWindow):
         self.find_previous_action.triggered.connect(self._search_previous_in_document)
         self.addAction(self.find_previous_action)
 
-        self.windowed_action = QAction("Windowed", self)
-        self.windowed_action.setShortcut(QKeySequence("Ctrl+1"))
-        self.windowed_action.triggered.connect(self.showNormal)
+        self.focus_editor_action = QAction("Focus Editor", self)
+        self.focus_editor_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.focus_editor_action.triggered.connect(self.editor_panel_focus)
+        self.addAction(self.focus_editor_action)
 
-        self.maximized_action = QAction("Maximized", self)
-        self.maximized_action.setShortcut(QKeySequence("Ctrl+2"))
-        self.maximized_action.triggered.connect(self.showMaximized)
+        self.zoom_in_action = QAction("Zoom In", self)
+        self.zoom_in_action.setShortcuts([QKeySequence.ZoomIn, QKeySequence("Ctrl+=")])
+        self.zoom_in_action.triggered.connect(self._zoom_in)
+        self.addAction(self.zoom_in_action)
 
-        self.fullscreen_action = QAction("Fullscreen", self)
-        self.fullscreen_action.setShortcut(QKeySequence("F11"))
-        self.fullscreen_action.triggered.connect(self._toggle_fullscreen)
-
-        self.exit_fullscreen_action = QAction("Exit Fullscreen", self)
-        self.exit_fullscreen_action.setShortcut(QKeySequence("Esc"))
-        self.exit_fullscreen_action.triggered.connect(self._exit_fullscreen)
-        self.addAction(self.exit_fullscreen_action)
+        self.zoom_out_action = QAction("Zoom Out", self)
+        self.zoom_out_action.setShortcuts([QKeySequence.ZoomOut, QKeySequence("Ctrl+-")])
+        self.zoom_out_action.triggered.connect(self._zoom_out)
+        self.addAction(self.zoom_out_action)
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main Toolbar", self)
@@ -141,13 +188,17 @@ class MainWindow(QMainWindow):
         toolbar.setFloatable(False)
         toolbar.setIconSize(toolbar.iconSize())
         toolbar.addAction(self.open_folder_action)
+        toolbar.addAction(self.save_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.preview_mode_action)
+        toolbar.addAction(self.edit_mode_action)
+        toolbar.addAction(self.edit_only_mode_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.undo_action)
+        toolbar.addAction(self.redo_action)
         toolbar.addSeparator()
         toolbar.addAction(self.find_in_document_action)
         toolbar.addAction(self.find_globally_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.windowed_action)
-        toolbar.addAction(self.maximized_action)
-        toolbar.addAction(self.fullscreen_action)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
     def _build_ui(self) -> None:
@@ -160,9 +211,17 @@ class MainWindow(QMainWindow):
         self.search_results_panel = SearchResultsPanel(self)
         self.search_results_panel.file_selected.connect(self._open_global_search_result)
 
+        self.editor_panel = MarkdownEditorPanel(self)
+        self.editor_panel.content_changed.connect(self._handle_editor_content_changed)
+        self.editor_panel.save_requested.connect(self.save_current_file)
+        self.editor_panel.editor.verticalScrollBar().valueChanged.connect(self._sync_preview_to_editor_scroll)
+
         self.viewer = MarkdownWebView(self)
         self.viewer.markdown_link_requested.connect(self._handle_markdown_link)
         self.viewer.status_message.connect(self.statusBar().showMessage)
+        self.viewer.installEventFilter(self)
+        if self.viewer.focusProxy() is not None:
+            self.viewer.focusProxy().installEventFilter(self)
 
         self.document_label = QLabel("No file opened")
         self.document_label.setObjectName("documentTitle")
@@ -202,13 +261,21 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.search_exec_button)
         search_layout.addWidget(self.search_close_button)
 
+        self.editor_preview_splitter = QSplitter(Qt.Horizontal, self)
+        self.editor_preview_splitter.setChildrenCollapsible(False)
+        self.editor_preview_splitter.addWidget(self.editor_panel)
+        self.editor_preview_splitter.addWidget(self.viewer)
+        self.editor_preview_splitter.setStretchFactor(0, 5)
+        self.editor_preview_splitter.setStretchFactor(1, 6)
+        self.editor_preview_splitter.setSizes([520, 620])
+
         center_panel = QWidget(self)
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(12, 12, 12, 12)
         center_layout.setSpacing(8)
         center_layout.addWidget(self.document_label)
         center_layout.addWidget(self.search_bar)
-        center_layout.addWidget(self.viewer, 1)
+        center_layout.addWidget(self.editor_preview_splitter, 1)
 
         self.right_tabs = QTabWidget(self)
         self.right_tabs.addTab(self.outline_panel, "Outline")
@@ -220,9 +287,9 @@ class MainWindow(QMainWindow):
         splitter.addWidget(center_panel)
         splitter.addWidget(self.right_tabs)
         splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 7)
+        splitter.setStretchFactor(1, 8)
         splitter.setStretchFactor(2, 3)
-        splitter.setSizes([300, 820, 360])
+        splitter.setSizes([300, 980, 360])
 
         self.setCentralWidget(splitter)
         self._update_search_mode_ui()
@@ -251,6 +318,21 @@ class MainWindow(QMainWindow):
             QToolButton:hover, QPushButton:hover {
                 background: #ecfeff;
                 border-color: #99f6e4;
+            }
+
+            QToolButton:checked {
+                background: #dff8f3;
+                border-color: #14b8a6;
+                color: #0f172a;
+            }
+
+            QPlainTextEdit {
+                background: white;
+                border: 1px solid #d8e1ec;
+                border-radius: 14px;
+                padding: 12px;
+                color: #0f172a;
+                selection-background-color: #99f6e4;
             }
 
             QSplitter::handle {
@@ -317,6 +399,9 @@ class MainWindow(QMainWindow):
         )
 
     def open_folder(self) -> None:
+        if not self._maybe_save_changes():
+            return
+
         folder = QFileDialog.getExistingDirectory(self, "Choose a Markdown Folder", str(Path.home()))
         if not folder:
             return
@@ -325,18 +410,107 @@ class MainWindow(QMainWindow):
         self.search_results_panel.show_hint("Enter a keyword and press Enter to search all Markdown files in the current folder.")
         self.statusBar().showMessage(f"Loaded folder: {folder}")
 
-    def open_markdown_file(self, file_path: str) -> None:
-        result = self.renderer.render_file(file_path)
-        self.current_file_path = file_path
-        self.document_label.setText(result.title)
-        self.document_label.setToolTip(file_path)
-        self.viewer.set_markdown_html(result.html, file_path)
-        self.outline_panel.load_outline(result.outline)
-        self.file_tree.refresh_file_title(file_path)
-        self.statusBar().showMessage(f"Opened: {file_path}")
+    def open_markdown_file(self, file_path: str) -> bool:
+        resolved_path = str(Path(file_path).resolve())
+        if resolved_path != self.current_file_path and not self._maybe_save_changes():
+            if self.current_file_path:
+                self.file_tree.select_file(self.current_file_path)
+            return False
+
+        try:
+            text, encoding = MarkdownRenderer.read_text_file_with_encoding(resolved_path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Read Error", f"Failed to open the file:\n{exc}")
+            return False
+
+        self.preview_refresh_timer.stop()
+        self.current_file_path = resolved_path
+        self.current_file_encoding = encoding
+        self.loaded_file_text = text
+        self.editor_panel.set_editor_enabled(True)
+        self.editor_panel.load_text(text)
+        self.save_action.setEnabled(True)
+        self.undo_action.setEnabled(True)
+        self.redo_action.setEnabled(True)
+        self._set_view_mode_actions_enabled(True)
+        self._set_view_mode("preview")
+        self._render_editor_contents()
+        self.statusBar().showMessage(f"Opened: {resolved_path}")
 
         if self._search_mode() == "document" and self.search_bar.isVisible():
-            self._run_document_search(self.search_input.text().strip())
+            query = self.search_input.text().strip()
+            if query:
+                QTimer.singleShot(0, lambda needle=query: self._run_document_search(needle))
+
+        return True
+
+    def save_current_file(self) -> bool:
+        if not self.current_file_path:
+            self.statusBar().showMessage("Open a Markdown file before saving.")
+            return False
+
+        text = self.editor_panel.text()
+        previous_encoding = self.current_file_encoding
+
+        try:
+            self.current_file_encoding = MarkdownRenderer.write_text_file(
+                self.current_file_path,
+                text,
+                self.current_file_encoding,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Save Error", f"Failed to save the file:\n{exc}")
+            return False
+
+        self.loaded_file_text = text
+        self.editor_panel.mark_saved()
+        self._render_editor_contents()
+        self.file_tree.refresh_file_title(self.current_file_path)
+        self._set_view_mode("preview")
+
+        if previous_encoding != self.current_file_encoding:
+            self.statusBar().showMessage(
+                f"Saved: {self.current_file_path} (switched to {self.current_file_encoding} encoding)."
+            )
+        else:
+            self.statusBar().showMessage(f"Saved: {self.current_file_path}")
+        return True
+
+    def editor_panel_focus(self) -> None:
+        if self.current_file_path:
+            if self.current_view_mode == "preview":
+                self._set_view_mode("edit")
+            self.editor_panel.focus_editor()
+
+    def _undo_edit(self) -> None:
+        if not self.current_file_path:
+            return
+        self.editor_panel.editor.undo()
+
+    def _redo_edit(self) -> None:
+        if not self.current_file_path:
+            return
+        self.editor_panel.editor.redo()
+
+    def _zoom_in(self) -> None:
+        self._apply_zoom_step(1)
+
+    def _zoom_out(self) -> None:
+        self._apply_zoom_step(-1)
+
+    def _apply_zoom_step(self, direction: int) -> None:
+        step = 0.1 if direction > 0 else -0.1
+        next_zoom = max(0.5, min(3.0, self.preview_zoom_factor + step))
+        if abs(next_zoom - self.preview_zoom_factor) < 1e-9:
+            return
+
+        self.preview_zoom_factor = next_zoom
+        self.viewer.setZoomFactor(self.preview_zoom_factor)
+        if direction > 0:
+            self.editor_panel.editor.zoomIn(1)
+        else:
+            self.editor_panel.editor.zoomOut(1)
+        self.statusBar().showMessage(f"Zoom: {int(round(self.preview_zoom_factor * 100))}%")
 
     def _handle_markdown_link(self, file_path: str) -> None:
         resolved_path = str(Path(file_path).resolve())
@@ -347,8 +521,100 @@ class MainWindow(QMainWindow):
         self.file_tree.select_file(resolved_path)
         self.open_markdown_file(resolved_path)
 
+    def _handle_editor_content_changed(self) -> None:
+        if not self.current_file_path:
+            return
+
+        self._update_document_label()
+        self.preview_refresh_timer.start()
+
+    def _render_editor_contents(self) -> None:
+        if not self.current_file_path:
+            return
+
+        scroll_ratio = self.editor_panel.scroll_ratio()
+        result = self.renderer.render_text(self.editor_panel.text(), Path(self.current_file_path).name)
+        self.viewer.set_markdown_html(result.html, self.current_file_path, scroll_ratio=scroll_ratio)
+        self.outline_panel.load_outline(result.outline)
+        self._update_document_label(result.title)
+        self.setWindowTitle(f"{result.title} - MDReader")
+
+        if self._search_mode() == "document" and self.search_bar.isVisible():
+            query = self.search_input.text().strip()
+            if query:
+                QTimer.singleShot(0, lambda needle=query: self._run_document_search(needle))
+
+    def _update_document_label(self, title: str | None = None) -> None:
+        if not self.current_file_path:
+            self.document_label.setText("No file opened")
+            self.document_label.setToolTip("")
+            return
+
+        actual_title = title or MarkdownRenderer.extract_title(self.editor_panel.text(), Path(self.current_file_path).name)
+        suffix = " *" if self._has_unsaved_changes() else ""
+        self.document_label.setText(f"{actual_title}{suffix}")
+        self.document_label.setToolTip(self.current_file_path)
+
     def _scroll_to_heading(self, heading_id: str) -> None:
         self.viewer.scroll_to_heading(heading_id)
+
+    def _set_view_mode_actions_enabled(self, enabled: bool) -> None:
+        for action in (self.preview_mode_action, self.edit_mode_action, self.edit_only_mode_action):
+            action.setEnabled(enabled)
+
+    def _set_view_mode(self, mode: str) -> None:
+        previous_mode = self.current_view_mode
+        self.current_view_mode = mode
+
+        if mode == "preview":
+            if self.editor_panel.isVisible() and self.viewer.isVisible():
+                self._last_split_sizes = self.editor_preview_splitter.sizes()
+            self.editor_panel.hide()
+            self.viewer.show()
+        elif mode == "edit":
+            self.editor_panel.show()
+            self.viewer.show()
+            self.editor_preview_splitter.setSizes(self._last_split_sizes)
+        else:
+            if self.editor_panel.isVisible() and self.viewer.isVisible():
+                self._last_split_sizes = self.editor_preview_splitter.sizes()
+            self.editor_panel.show()
+            self.viewer.hide()
+
+        action_map = {
+            "preview": self.preview_mode_action,
+            "edit": self.edit_mode_action,
+            "edit_only": self.edit_only_mode_action,
+        }
+        for name, action in action_map.items():
+            action.blockSignals(True)
+            action.setChecked(name == mode)
+            action.blockSignals(False)
+
+        if mode in {"edit", "edit_only"} and self.current_file_path:
+            self.editor_panel.focus_editor()
+            if previous_mode == "preview":
+                QTimer.singleShot(0, self._sync_editor_to_preview_scroll)
+
+    def _sync_preview_to_editor_scroll(self) -> None:
+        if self._scroll_sync_guard or self.current_view_mode != "edit":
+            return
+        self.viewer.set_scroll_ratio(self.editor_panel.scroll_ratio())
+
+    def _sync_editor_to_preview_scroll(self) -> None:
+        if self._scroll_sync_guard or self.current_view_mode != "edit":
+            return
+        self.viewer.get_scroll_ratio(self._apply_preview_scroll_ratio)
+
+    def _apply_preview_scroll_ratio(self, ratio) -> None:
+        if ratio is None or self.current_view_mode != "edit":
+            return
+
+        self._scroll_sync_guard = True
+        try:
+            self.editor_panel.set_scroll_ratio(float(ratio))
+        finally:
+            self._scroll_sync_guard = False
 
     def _activate_search(self, mode: str) -> None:
         if mode == "document" and not self.current_file_path:
@@ -493,7 +759,9 @@ class MainWindow(QMainWindow):
 
     def _open_global_search_result(self, file_path: str) -> None:
         self.file_tree.select_file(file_path)
-        self.open_markdown_file(file_path)
+        opened = self.open_markdown_file(file_path)
+        if not opened:
+            return
 
         query = self.search_input.text().strip()
         if query:
@@ -530,12 +798,37 @@ class MainWindow(QMainWindow):
             snippet += "..."
         return snippet
 
-    def _toggle_fullscreen(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
-        else:
-            self.showFullScreen()
+    def _has_unsaved_changes(self) -> bool:
+        if not self.current_file_path:
+            return False
+        return self.editor_panel.text() != self.loaded_file_text
 
-    def _exit_fullscreen(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
+    def _maybe_save_changes(self) -> bool:
+        if not self.current_file_path or not self._has_unsaved_changes():
+            return True
+
+        file_name = Path(self.current_file_path).name
+        answer = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f'Save changes to "{file_name}" before continuing?',
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+
+        if answer == QMessageBox.Save:
+            return self.save_current_file()
+        if answer == QMessageBox.Cancel:
+            return False
+        return True
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.viewer and event.type() == QEvent.Type.Wheel and self.current_view_mode == "edit":
+            QTimer.singleShot(0, self._sync_editor_to_preview_scroll)
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event) -> None:
+        if self._maybe_save_changes():
+            event.accept()
+        else:
+            event.ignore()

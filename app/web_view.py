@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWebEngineCore import (
     QWebEnginePage,
@@ -56,6 +56,7 @@ class MarkdownWebView(QWebEngineView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._pending_scroll_ratio: float | None = None
 
         profile = QWebEngineProfile("MDReaderProfile", self)
         profile.setHttpCacheType(QWebEngineProfile.NoCache)
@@ -68,6 +69,7 @@ class MarkdownWebView(QWebEngineView):
         page.markdown_link_requested.connect(self.markdown_link_requested)
         page.status_message.connect(self.status_message)
         self.setPage(page)
+        self.loadFinished.connect(self._restore_pending_scroll_ratio)
 
         settings = self.settings()
         settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
@@ -75,13 +77,19 @@ class MarkdownWebView(QWebEngineView):
         settings.setAttribute(QWebEngineSettings.JavascriptCanOpenWindows, False)
         settings.setAttribute(QWebEngineSettings.PluginsEnabled, False)
 
-    def set_markdown_html(self, html_content: str, file_path: str | None = None) -> None:
+    def set_markdown_html(
+        self,
+        html_content: str,
+        file_path: str | None = None,
+        scroll_ratio: float | None = None,
+    ) -> None:
         base_url = QUrl()
         if file_path:
             base_folder = str(Path(file_path).resolve().parent)
             if not base_folder.endswith(("\\", "/")):
                 base_folder += "/"
             base_url = QUrl.fromLocalFile(base_folder)
+        self._pending_scroll_ratio = scroll_ratio
         self.setHtml(html_content, base_url)
 
     def scroll_to_heading(self, heading_id: str) -> None:
@@ -111,3 +119,42 @@ class MarkdownWebView(QWebEngineView):
 
     def clear_find(self) -> None:
         self.page().findText("")
+
+    def get_scroll_ratio(self, callback) -> None:
+        script = """
+        (function () {
+          const root = document.scrollingElement || document.documentElement || document.body;
+          if (!root) {
+            return 0;
+          }
+          const maxScroll = Math.max(root.scrollHeight - window.innerHeight, 0);
+          if (maxScroll <= 0) {
+            return 0;
+          }
+          return root.scrollTop / maxScroll;
+        })();
+        """
+        self.page().runJavaScript(script, callback)
+
+    def set_scroll_ratio(self, ratio: float) -> None:
+        safe_ratio = max(0.0, min(1.0, float(ratio)))
+        script = f"""
+        (function () {{
+          const root = document.scrollingElement || document.documentElement || document.body;
+          if (!root) {{
+            return;
+          }}
+          const maxScroll = Math.max(root.scrollHeight - window.innerHeight, 0);
+          root.scrollTop = maxScroll * {safe_ratio};
+        }})();
+        """
+        self.page().runJavaScript(script)
+
+    def _restore_pending_scroll_ratio(self, ok: bool) -> None:
+        if not ok or self._pending_scroll_ratio is None:
+            self._pending_scroll_ratio = None
+            return
+
+        ratio = self._pending_scroll_ratio
+        self._pending_scroll_ratio = None
+        QTimer.singleShot(0, lambda: self.set_scroll_ratio(ratio))
