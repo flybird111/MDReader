@@ -129,6 +129,25 @@ class FileTreePanel(QWidget):
     def refresh_file_title(self, file_path: str) -> None:
         self.model.refresh_title(file_path)
 
+    def refresh_root(self) -> None:
+        if self._root_path:
+            self.set_root_path(self._root_path)
+
+    def current_path(self) -> str:
+        proxy_index = self.tree.currentIndex()
+        if not proxy_index.isValid():
+            return ""
+
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return ""
+
+        return self.model.filePath(source_index)
+
+    def clear_selection(self) -> None:
+        self.tree.clearSelection()
+        self.tree.setCurrentIndex(QModelIndex())
+
     def select_file(self, file_path: str) -> None:
         source_index = self.model.index(file_path)
         if not source_index.isValid():

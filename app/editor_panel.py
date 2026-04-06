@@ -1,8 +1,69 @@
 import re
 
-from PySide6.QtCore import QSignalBlocker, Signal
-from PySide6.QtGui import QFontDatabase, QTextCursor
-from PySide6.QtWidgets import QColorDialog, QGridLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QMimeData, QSignalBlocker, Signal
+from PySide6.QtGui import QContextMenuEvent, QFontDatabase, QTextCursor, QTextDocument
+from PySide6.QtWidgets import QApplication, QColorDialog, QGridLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+
+
+class MarkdownTextEdit(QPlainTextEdit):
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:
+        if source.hasHtml() or source.hasText():
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source: QMimeData) -> None:
+        if source.hasHtml():
+            markdown = self._html_to_markdown(source.html())
+            if markdown:
+                self.textCursor().insertText(markdown)
+                return
+        super().insertFromMimeData(source)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = self.createStandardContextMenu()
+        clipboard = QApplication.clipboard()
+
+        plain_action = menu.addAction("Paste as Plain Text")
+        plain_action.triggered.connect(self.paste_plain_text)
+        plain_action.setEnabled(bool(clipboard.mimeData().hasText()))
+
+        formatted_action = menu.addAction("Paste as Formatted Text")
+        formatted_action.triggered.connect(self.paste_formatted_text)
+        formatted_action.setEnabled(bool(clipboard.mimeData().hasHtml() or clipboard.mimeData().hasText()))
+
+        menu.exec(event.globalPos())
+
+    def paste_plain_text(self) -> None:
+        text = QApplication.clipboard().text()
+        if text:
+            self.textCursor().insertText(text)
+
+    def paste_formatted_text(self) -> None:
+        mime_data = QApplication.clipboard().mimeData()
+        if mime_data is None:
+            return
+
+        if mime_data.hasHtml():
+            markdown = self._html_to_markdown(mime_data.html())
+            if markdown:
+                self.textCursor().insertText(markdown)
+                return
+
+        if mime_data.hasText():
+            self.textCursor().insertText(mime_data.text())
+
+    def _html_to_markdown(self, html: str) -> str:
+        document = QTextDocument()
+        document.setHtml(html)
+        markdown = document.toMarkdown().replace("\r\n", "\n")
+
+        # QTextDocument tends to emit very large blank gaps for some pasted rich text.
+        markdown = re.sub(r"\n{4,}", "\n\n\n", markdown)
+
+        # Repair a known edge case where a closing code fence can collapse into a table row.
+        markdown = markdown.replace("|```", "|\n\n```")
+
+        return markdown.strip("\n")
 
 
 class MarkdownEditorPanel(QWidget):
@@ -15,7 +76,7 @@ class MarkdownEditorPanel(QWidget):
         self.title_label = QLabel("Editor")
         self.title_label.setObjectName("panelTitle")
 
-        self.editor = QPlainTextEdit(self)
+        self.editor = MarkdownTextEdit(self)
         self.editor.setPlaceholderText("Open a Markdown file to start editing.")
         self.editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.editor.setTabStopDistance(32)
@@ -60,7 +121,7 @@ class MarkdownEditorPanel(QWidget):
     def set_editor_enabled(self, enabled: bool) -> None:
         self.editor.setEnabled(enabled)
         if enabled:
-            self.editor.setPlaceholderText("Edit Markdown here. The preview updates automatically.")
+            self.editor.setPlaceholderText("Edit Markdown here. Rich text paste is converted to Markdown automatically.")
         else:
             self.editor.setPlaceholderText("Open a Markdown file to start editing.")
 

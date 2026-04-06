@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
@@ -6,6 +7,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -117,6 +119,27 @@ class MainWindow(QMainWindow):
         self.save_action.setEnabled(False)
         self.addAction(self.save_action)
 
+        self.add_file_action = QAction("Add File", self)
+        self.add_file_action.triggered.connect(self.add_markdown_file)
+        self.add_file_action.setEnabled(False)
+        self.addAction(self.add_file_action)
+
+        self.add_folder_action = QAction("Add Folder", self)
+        self.add_folder_action.triggered.connect(self.add_folder)
+        self.add_folder_action.setEnabled(False)
+        self.addAction(self.add_folder_action)
+
+        self.delete_path_action = QAction("Delete", self)
+        self.delete_path_action.triggered.connect(self.delete_selected_path)
+        self.delete_path_action.setEnabled(False)
+        self.addAction(self.delete_path_action)
+
+        self.rename_path_action = QAction("Rename", self)
+        self.rename_path_action.setShortcut(QKeySequence("F2"))
+        self.rename_path_action.triggered.connect(self.rename_selected_path)
+        self.rename_path_action.setEnabled(False)
+        self.addAction(self.rename_path_action)
+
         self.undo_action = QAction("Undo", self)
         self.undo_action.setShortcut(QKeySequence.Undo)
         self.undo_action.triggered.connect(self._undo_edit)
@@ -189,6 +212,10 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(toolbar.iconSize())
         toolbar.addAction(self.open_folder_action)
         toolbar.addAction(self.save_action)
+        toolbar.addAction(self.add_file_action)
+        toolbar.addAction(self.add_folder_action)
+        toolbar.addAction(self.rename_path_action)
+        toolbar.addAction(self.delete_path_action)
         toolbar.addSeparator()
         toolbar.addAction(self.preview_mode_action)
         toolbar.addAction(self.edit_mode_action)
@@ -408,6 +435,10 @@ class MainWindow(QMainWindow):
 
         self.file_tree.set_root_path(folder)
         self.search_results_panel.show_hint("Enter a keyword and press Enter to search all Markdown files in the current folder.")
+        self.add_file_action.setEnabled(True)
+        self.add_folder_action.setEnabled(True)
+        self.rename_path_action.setEnabled(True)
+        self.delete_path_action.setEnabled(True)
         self.statusBar().showMessage(f"Loaded folder: {folder}")
 
     def open_markdown_file(self, file_path: str) -> bool:
@@ -475,6 +506,197 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Saved: {self.current_file_path}")
         return True
+
+    def add_markdown_file(self) -> None:
+        parent_dir = self._selected_directory_path()
+        if not parent_dir:
+            self.statusBar().showMessage("Open a folder before creating a Markdown file.")
+            return
+
+        file_name, accepted = QInputDialog.getText(
+            self,
+            "Add Markdown File",
+            "File name:",
+            text="new-note.md",
+        )
+        if not accepted or not file_name.strip():
+            return
+
+        normalized_name = file_name.strip()
+        if Path(normalized_name).suffix.lower() not in ALLOWED_SUFFIXES:
+            normalized_name += ".md"
+
+        target_path = parent_dir / normalized_name
+        if target_path.exists():
+            QMessageBox.warning(self, "File Exists", f"The file already exists:\n{target_path}")
+            return
+
+        initial_title = MarkdownRenderer.extract_title("", target_path.stem.replace("-", " ").replace("_", " ").title())
+        initial_content = f"# {initial_title}\n\n"
+
+        try:
+            MarkdownRenderer.write_text_file(target_path, initial_content, "utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Create File Error", f"Failed to create the file:\n{exc}")
+            return
+
+        self.file_tree.refresh_root()
+        self.file_tree.select_file(str(target_path.resolve()))
+        self.open_markdown_file(str(target_path.resolve()))
+        self._set_view_mode("edit")
+        self.statusBar().showMessage(f"Created file: {target_path}")
+
+    def add_folder(self) -> None:
+        parent_dir = self._selected_directory_path()
+        if not parent_dir:
+            self.statusBar().showMessage("Open a folder before creating a subfolder.")
+            return
+
+        folder_name, accepted = QInputDialog.getText(
+            self,
+            "Add Folder",
+            "Folder name:",
+            text="new-folder",
+        )
+        if not accepted or not folder_name.strip():
+            return
+
+        target_path = parent_dir / folder_name.strip()
+        if target_path.exists():
+            QMessageBox.warning(self, "Folder Exists", f"The folder already exists:\n{target_path}")
+            return
+
+        try:
+            target_path.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            QMessageBox.warning(self, "Create Folder Error", f"Failed to create the folder:\n{exc}")
+            return
+
+        self.file_tree.refresh_root()
+        self.statusBar().showMessage(f"Created folder: {target_path}")
+
+    def delete_selected_path(self) -> None:
+        target = self._selected_tree_path()
+        if not target:
+            self.statusBar().showMessage("Select a file or folder to delete.")
+            return
+
+        resolved_target = target.resolve()
+        root = Path(self.file_tree.root_path).resolve() if self.file_tree.root_path else None
+        if root is None:
+            return
+
+        try:
+            resolved_target.relative_to(root)
+        except ValueError:
+            QMessageBox.warning(self, "Delete Blocked", "Only items inside the current root folder can be deleted.")
+            return
+
+        if resolved_target == root:
+            QMessageBox.warning(self, "Delete Blocked", "The current root folder cannot be deleted from inside the app.")
+            return
+
+        label = "folder" if resolved_target.is_dir() else "file"
+        answer = QMessageBox.question(
+            self,
+            f"Delete {label.title()}",
+            f"Delete this {label}?\n{resolved_target}",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        if self.current_file_path:
+            current_path = Path(self.current_file_path).resolve()
+            if current_path == resolved_target or resolved_target in current_path.parents:
+                if self._has_unsaved_changes():
+                    discard = QMessageBox.question(
+                        self,
+                        "Discard Unsaved Changes",
+                        "The selected item contains the currently open document. Delete it and discard unsaved changes?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if discard != QMessageBox.Yes:
+                        return
+
+        try:
+            if resolved_target.is_dir():
+                shutil.rmtree(resolved_target)
+            else:
+                resolved_target.unlink()
+        except OSError as exc:
+            QMessageBox.warning(self, "Delete Error", f"Failed to delete the selected item:\n{exc}")
+            return
+
+        if self.current_file_path:
+            current_path = Path(self.current_file_path).resolve()
+            if current_path == resolved_target or resolved_target in current_path.parents:
+                self._clear_current_document_state()
+
+        self.file_tree.refresh_root()
+        self.file_tree.clear_selection()
+        self.statusBar().showMessage(f"Deleted: {resolved_target}")
+
+    def rename_selected_path(self) -> None:
+        target = self._selected_tree_path()
+        if not target:
+            self.statusBar().showMessage("Select a file or folder to rename.")
+            return
+
+        resolved_target = target.resolve()
+        root = Path(self.file_tree.root_path).resolve() if self.file_tree.root_path else None
+        if root is None:
+            return
+
+        try:
+            resolved_target.relative_to(root)
+        except ValueError:
+            QMessageBox.warning(self, "Rename Blocked", "Only items inside the current root folder can be renamed.")
+            return
+
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Rename",
+            "New name:",
+            text=resolved_target.name,
+        )
+        if not accepted or not new_name.strip():
+            return
+
+        normalized_name = new_name.strip()
+        if normalized_name == resolved_target.name:
+            return
+
+        destination = resolved_target.with_name(normalized_name)
+        if destination.exists():
+            QMessageBox.warning(self, "Rename Error", f"An item with this name already exists:\n{destination}")
+            return
+
+        try:
+            resolved_target.rename(destination)
+        except OSError as exc:
+            QMessageBox.warning(self, "Rename Error", f"Failed to rename the selected item:\n{exc}")
+            return
+
+        self._remap_paths_after_rename(resolved_target, destination)
+
+        if resolved_target == root:
+            self.file_tree.set_root_path(str(destination))
+        else:
+            self.file_tree.refresh_root()
+
+        if self.current_file_path:
+            self._render_editor_contents()
+            self.document_label.setToolTip(self.current_file_path)
+
+        if destination.is_file():
+            self.file_tree.select_file(str(destination.resolve()))
+        elif self.current_file_path:
+            self.file_tree.select_file(self.current_file_path)
+
+        self.statusBar().showMessage(f"Renamed: {resolved_target.name} -> {destination.name}")
 
     def editor_panel_focus(self) -> None:
         if self.current_file_path:
@@ -798,6 +1020,68 @@ class MainWindow(QMainWindow):
             snippet += "..."
         return snippet
 
+    def _selected_tree_path(self) -> Path | None:
+        selected_path = self.file_tree.current_path()
+        if selected_path:
+            return Path(selected_path)
+
+        if self.current_file_path:
+            return Path(self.current_file_path)
+
+        if self.file_tree.root_path:
+            return Path(self.file_tree.root_path)
+
+        return None
+
+    def _selected_directory_path(self) -> Path | None:
+        target = self._selected_tree_path()
+        if target is None:
+            return None
+        if target.is_dir():
+            return target
+        return target.parent
+
+    def _remap_paths_after_rename(self, old_path: Path, new_path: Path) -> None:
+        old_resolved = old_path.resolve()
+        new_resolved = new_path.resolve()
+
+        if self.current_file_path:
+            current_resolved = Path(self.current_file_path).resolve()
+            if current_resolved == old_resolved:
+                self.current_file_path = str(new_resolved)
+            else:
+                try:
+                    relative_path = current_resolved.relative_to(old_resolved)
+                except ValueError:
+                    pass
+                else:
+                    self.current_file_path = str((new_resolved / relative_path).resolve())
+
+        if self.file_tree.root_path:
+            root_resolved = Path(self.file_tree.root_path).resolve()
+            if root_resolved == old_resolved:
+                self.file_tree._root_path = str(new_resolved)
+
+    def _clear_current_document_state(self) -> None:
+        self.preview_refresh_timer.stop()
+        self.current_file_path = ""
+        self.current_file_encoding = "utf-8"
+        self.loaded_file_text = ""
+        self.editor_panel.load_text("")
+        self.editor_panel.set_editor_enabled(False)
+        self.save_action.setEnabled(False)
+        self.undo_action.setEnabled(False)
+        self.redo_action.setEnabled(False)
+        self.rename_path_action.setEnabled(bool(self.file_tree.root_path))
+        self._set_view_mode_actions_enabled(False)
+        self._set_view_mode("preview")
+        welcome = self.renderer.render_welcome()
+        self.viewer.set_markdown_html(welcome.html)
+        self.outline_panel.load_outline([])
+        self.document_label.setText("No file opened")
+        self.document_label.setToolTip("")
+        self.setWindowTitle("MDReader - Local Offline Markdown Reader")
+
     def _has_unsaved_changes(self) -> bool:
         if not self.current_file_path:
             return False
@@ -823,7 +1107,8 @@ class MainWindow(QMainWindow):
         return True
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.viewer and event.type() == QEvent.Type.Wheel and self.current_view_mode == "edit":
+        viewer_proxy = self.viewer.focusProxy()
+        if watched in {self.viewer, viewer_proxy} and event.type() == QEvent.Type.Wheel and self.current_view_mode == "edit":
             QTimer.singleShot(0, self._sync_editor_to_preview_scroll)
         return super().eventFilter(watched, event)
 

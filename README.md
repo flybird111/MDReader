@@ -7,10 +7,14 @@ It lets you open a folder of Markdown files, browse them from a tree view, edit 
 ## Features
 
 - Open a local folder containing `.md` and `.markdown` files
+- Create and delete Markdown files and folders inside the current root folder
+- Rename files and folders directly inside the current root folder
 - Edit Markdown files directly inside the app with a live preview
 - Switch between `Preview`, split `Edit`, and `Edit Only` modes from the top toolbar
 - Save updates back to the original file with `Ctrl+S`
 - Undo and redo edits with `Ctrl+Z` and `Ctrl+Y`
+- Paste rich text from the web and convert it to Markdown automatically
+- Choose `Paste as Plain Text` or `Paste as Formatted Text` from the editor right-click menu
 - Render Markdown with code highlighting and local file links
 - Show the current document outline in a side panel
 - Insert common Markdown structures such as headings, bold text, underline, colored text, inline code, code blocks, tables, and horizontal rules
@@ -82,6 +86,8 @@ app/
 
 - The app is designed for local Markdown reading and intentionally blocks external HTTP and HTTPS navigation.
 - The editor works on Markdown source directly and updates the preview automatically as you type.
+- Rich text pasted from sources such as ChatGPT is converted to Markdown before insertion whenever HTML content is available in the clipboard.
+- The editor context menu includes both plain-text paste and formatted-text paste options.
 - Underline and text color are inserted using inline HTML, which is supported by the built-in renderer.
 - Global search scans Markdown files under the currently opened root folder.
 - File tree titles are derived from the first Markdown heading when available; otherwise the file name is used.
