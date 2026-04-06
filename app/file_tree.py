@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QModelIndex, QSortFilterProxyModel, Qt, Signal
+from PySide6.QtCore import QDir, QModelIndex, QPoint, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtWidgets import QFileSystemModel, QLabel, QTreeView, QVBoxLayout, QWidget
 
 from app.markdown_renderer import MarkdownRenderer
@@ -143,6 +143,29 @@ class FileTreePanel(QWidget):
             return ""
 
         return self.model.filePath(source_index)
+
+    def path_at(self, pos: QPoint) -> str:
+        proxy_index = self.tree.indexAt(pos)
+        if not proxy_index.isValid():
+            return ""
+
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return ""
+
+        return self.model.filePath(source_index)
+
+    def select_path(self, file_path: str) -> None:
+        source_index = self.model.index(file_path)
+        if not source_index.isValid():
+            return
+
+        proxy_index = self.proxy_model.mapFromSource(source_index)
+        if not proxy_index.isValid():
+            return
+
+        self.tree.setCurrentIndex(proxy_index)
+        self.tree.scrollTo(proxy_index)
 
     def clear_selection(self) -> None:
         self.tree.clearSelection()

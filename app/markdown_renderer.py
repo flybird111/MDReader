@@ -209,7 +209,7 @@ class MarkdownRenderer:
         radial-gradient(circle at top right, rgba(15, 118, 110, 0.08), transparent 28%),
         linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
       color: var(--text);
-      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-family: "Segoe UI", "SF Pro Text", "Helvetica Neue", "Noto Sans", "Ubuntu", "Cantarell", "Microsoft YaHei", sans-serif;
       line-height: 1.7;
     }}
 
@@ -279,7 +279,7 @@ class MarkdownRenderer:
       padding: 0.15em 0.35em;
       border-radius: 6px;
       background: var(--code-bg);
-      font-family: "Cascadia Code", "Consolas", monospace;
+      font-family: "Cascadia Code", "SFMono-Regular", "Menlo", "Consolas", "Liberation Mono", monospace;
       font-size: 0.92em;
     }}
 

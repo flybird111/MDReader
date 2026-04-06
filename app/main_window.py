@@ -1,5 +1,6 @@
-from pathlib import Path
 import shutil
+import sys
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -27,6 +29,15 @@ from app.file_tree import ALLOWED_SUFFIXES, FileTreePanel
 from app.markdown_renderer import MarkdownRenderer
 from app.outline_panel import OutlinePanel
 from app.web_view import MarkdownWebView
+
+
+IS_MACOS = sys.platform == "darwin"
+
+
+def platform_sequence(default_shortcut: str, macos_shortcut: str | None = None) -> list[QKeySequence]:
+    if IS_MACOS and macos_shortcut:
+        return [QKeySequence(macos_shortcut)]
+    return [QKeySequence(default_shortcut)]
 
 
 class SearchResultsPanel(QWidget):
@@ -86,6 +97,9 @@ class MainWindow(QMainWindow):
         self.current_view_mode = "preview"
         self._scroll_sync_guard = False
         self._last_split_sizes = [520, 620]
+        self._left_sidebar_visible = True
+        self._right_sidebar_visible = True
+        self._main_splitter_sizes = [300, 980, 360]
         self.renderer = MarkdownRenderer()
         self.preview_zoom_factor = 1.0
 
@@ -97,8 +111,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MDReader - Local Offline Markdown Reader")
         self.resize(1560, 940)
         self.setMinimumSize(1180, 720)
+        if IS_MACOS:
+            self.setUnifiedTitleAndToolBarOnMac(True)
 
         self._build_actions()
+        self._build_menus()
         self._build_toolbar()
         self._build_ui()
         self._apply_styles()
@@ -110,7 +127,7 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self) -> None:
         self.open_folder_action = QAction("Open Folder", self)
-        self.open_folder_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.open_folder_action.setShortcuts(QKeySequence.keyBindings(QKeySequence.StandardKey.Open))
         self.open_folder_action.triggered.connect(self.open_folder)
 
         self.save_action = QAction("Save", self)
@@ -155,10 +172,12 @@ class MainWindow(QMainWindow):
         self.preview_mode_action = QAction("Preview", self)
         self.preview_mode_action.setCheckable(True)
         self.preview_mode_action.triggered.connect(lambda checked: checked and self._set_view_mode("preview"))
+        self.preview_mode_action.setEnabled(False)
 
         self.edit_mode_action = QAction("Edit", self)
         self.edit_mode_action.setCheckable(True)
         self.edit_mode_action.triggered.connect(lambda checked: checked and self._set_view_mode("edit"))
+        self.edit_mode_action.setEnabled(False)
 
         self.edit_only_mode_action = QAction("Edit Only", self)
         self.edit_only_mode_action.setCheckable(True)
@@ -176,7 +195,7 @@ class MainWindow(QMainWindow):
         self.addAction(self.find_in_document_action)
 
         self.find_globally_action = QAction("Global Search", self)
-        self.find_globally_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        self.find_globally_action.setShortcuts(platform_sequence("Ctrl+Shift+F", "Meta+Shift+F"))
         self.find_globally_action.triggered.connect(lambda: self._activate_search("global"))
         self.addAction(self.find_globally_action)
 
@@ -190,8 +209,13 @@ class MainWindow(QMainWindow):
         self.find_previous_action.triggered.connect(self._search_previous_in_document)
         self.addAction(self.find_previous_action)
 
+        self.exit_action = QAction("Exit", self)
+        self.exit_action.setShortcut(QKeySequence.Quit)
+        self.exit_action.triggered.connect(self.close)
+        self.addAction(self.exit_action)
+
         self.focus_editor_action = QAction("Focus Editor", self)
-        self.focus_editor_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.focus_editor_action.setShortcuts(platform_sequence("Ctrl+E", "Meta+E"))
         self.focus_editor_action.triggered.connect(self.editor_panel_focus)
         self.addAction(self.focus_editor_action)
 
@@ -205,6 +229,83 @@ class MainWindow(QMainWindow):
         self.zoom_out_action.triggered.connect(self._zoom_out)
         self.addAction(self.zoom_out_action)
 
+        self.preview_mode_menu_action = QAction("Preview Mode", self)
+        self.preview_mode_menu_action.setCheckable(True)
+        self.preview_mode_menu_action.triggered.connect(lambda checked: checked and self._set_view_mode("preview"))
+        self.preview_mode_menu_action.setEnabled(False)
+
+        self.edit_mode_menu_action = QAction("Edit Mode", self)
+        self.edit_mode_menu_action.setCheckable(True)
+        self.edit_mode_menu_action.triggered.connect(lambda checked: checked and self._set_view_mode("edit"))
+        self.edit_mode_menu_action.setEnabled(False)
+
+        self.view_mode_menu_group = QActionGroup(self)
+        self.view_mode_menu_group.setExclusive(True)
+        self.view_mode_menu_group.addAction(self.preview_mode_menu_action)
+        self.view_mode_menu_group.addAction(self.edit_mode_menu_action)
+
+        self.toggle_left_sidebar_action = QAction("Toggle Left Sidebar", self)
+        self.toggle_left_sidebar_action.setShortcuts(platform_sequence("Ctrl+B", "Meta+B"))
+        self.toggle_left_sidebar_action.setCheckable(True)
+        self.toggle_left_sidebar_action.setChecked(True)
+        self.toggle_left_sidebar_action.triggered.connect(self._toggle_left_sidebar)
+        self.addAction(self.toggle_left_sidebar_action)
+
+        self.toggle_right_outline_action = QAction("Toggle Right Outline", self)
+        self.toggle_right_outline_action.setShortcuts(platform_sequence("Ctrl+Alt+B", "Meta+Alt+B"))
+        self.toggle_right_outline_action.setCheckable(True)
+        self.toggle_right_outline_action.setChecked(True)
+        self.toggle_right_outline_action.triggered.connect(self._toggle_right_sidebar)
+        self.addAction(self.toggle_right_outline_action)
+
+        self.fullscreen_action = QAction("Fullscreen", self)
+        self.fullscreen_action.setShortcuts(platform_sequence("F11", "Meta+Ctrl+F"))
+        self.fullscreen_action.setCheckable(True)
+        self.fullscreen_action.triggered.connect(self._toggle_fullscreen)
+        self.addAction(self.fullscreen_action)
+
+        self.exit_fullscreen_action = QAction("Exit Fullscreen", self)
+        self.exit_fullscreen_action.setShortcut(QKeySequence("Esc"))
+        self.exit_fullscreen_action.triggered.connect(self._exit_fullscreen)
+        self.addAction(self.exit_fullscreen_action)
+
+        self.about_action = QAction("About", self)
+        self.about_action.triggered.connect(self._show_about_dialog)
+
+    def _build_menus(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("File")
+        file_menu.addAction(self.open_folder_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.add_file_action)
+        file_menu.addAction(self.add_folder_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.save_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
+
+        edit_menu = menu_bar.addMenu("Edit")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.rename_path_action)
+        edit_menu.addAction(self.delete_path_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.find_in_document_action)
+
+        view_menu = menu_bar.addMenu("View")
+        view_menu.addAction(self.preview_mode_menu_action)
+        view_menu.addAction(self.edit_mode_menu_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.toggle_left_sidebar_action)
+        view_menu.addAction(self.toggle_right_outline_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self.fullscreen_action)
+
+        help_menu = menu_bar.addMenu("Help")
+        help_menu.addAction(self.about_action)
+
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Main Toolbar", self)
         toolbar.setMovable(False)
@@ -212,25 +313,16 @@ class MainWindow(QMainWindow):
         toolbar.setIconSize(toolbar.iconSize())
         toolbar.addAction(self.open_folder_action)
         toolbar.addAction(self.save_action)
-        toolbar.addAction(self.add_file_action)
-        toolbar.addAction(self.add_folder_action)
-        toolbar.addAction(self.rename_path_action)
-        toolbar.addAction(self.delete_path_action)
         toolbar.addSeparator()
         toolbar.addAction(self.preview_mode_action)
         toolbar.addAction(self.edit_mode_action)
-        toolbar.addAction(self.edit_only_mode_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.undo_action)
-        toolbar.addAction(self.redo_action)
-        toolbar.addSeparator()
-        toolbar.addAction(self.find_in_document_action)
-        toolbar.addAction(self.find_globally_action)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
     def _build_ui(self) -> None:
         self.file_tree = FileTreePanel(self)
         self.file_tree.file_selected.connect(self.open_markdown_file)
+        self.file_tree.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_tree.tree.customContextMenuRequested.connect(self._show_file_tree_context_menu)
 
         self.outline_panel = OutlinePanel(self)
         self.outline_panel.heading_selected.connect(self._scroll_to_heading)
@@ -308,109 +400,139 @@ class MainWindow(QMainWindow):
         self.right_tabs.addTab(self.outline_panel, "Outline")
         self.right_tabs.addTab(self.search_results_panel, "Search Results")
 
-        splitter = QSplitter(Qt.Horizontal, self)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(self.file_tree)
-        splitter.addWidget(center_panel)
-        splitter.addWidget(self.right_tabs)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 8)
-        splitter.setStretchFactor(2, 3)
-        splitter.setSizes([300, 980, 360])
+        self.main_splitter = QSplitter(Qt.Horizontal, self)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(self.file_tree)
+        self.main_splitter.addWidget(center_panel)
+        self.main_splitter.addWidget(self.right_tabs)
+        self.main_splitter.setStretchFactor(0, 2)
+        self.main_splitter.setStretchFactor(1, 8)
+        self.main_splitter.setStretchFactor(2, 3)
+        self.main_splitter.setSizes(self._main_splitter_sizes)
 
-        self.setCentralWidget(splitter)
+        self.setCentralWidget(self.main_splitter)
         self._update_search_mode_ui()
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #eef3f8;
+                background: #f3f3f3;
+            }
+
+            QMenuBar {
+                background: #f3f3f3;
+                border-bottom: 1px solid #dddddd;
+                padding: 2px 6px;
+            }
+
+            QMenuBar::item {
+                padding: 4px 8px;
+                border-radius: 4px;
+                background: transparent;
+            }
+
+            QMenuBar::item:selected {
+                background: #e8e8e8;
+            }
+
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #d9d9d9;
+                padding: 4px;
+            }
+
+            QMenu::item {
+                padding: 6px 24px 6px 10px;
+                border-radius: 4px;
+            }
+
+            QMenu::item:selected {
+                background: #e8e8e8;
             }
 
             QToolBar {
-                spacing: 8px;
-                padding: 8px 12px;
-                background: #f8fbff;
-                border-bottom: 1px solid #d8e1ec;
+                spacing: 4px;
+                padding: 4px 8px;
+                background: #f7f7f7;
+                border-bottom: 1px solid #dddddd;
             }
 
             QToolButton, QPushButton, QComboBox, QLineEdit {
-                padding: 8px 12px;
-                border: 1px solid #d8e1ec;
-                border-radius: 10px;
+                padding: 4px 8px;
+                border: 1px solid #d4d4d4;
+                border-radius: 4px;
                 background: white;
             }
 
             QToolButton:hover, QPushButton:hover {
-                background: #ecfeff;
-                border-color: #99f6e4;
+                background: #f0f0f0;
+                border-color: #c6c6c6;
             }
 
             QToolButton:checked {
-                background: #dff8f3;
-                border-color: #14b8a6;
+                background: #e6f2ff;
+                border-color: #7aa7d9;
                 color: #0f172a;
             }
 
             QPlainTextEdit {
                 background: white;
-                border: 1px solid #d8e1ec;
-                border-radius: 14px;
-                padding: 12px;
+                border: 1px solid #d4d4d4;
+                border-radius: 4px;
+                padding: 8px;
                 color: #0f172a;
-                selection-background-color: #99f6e4;
+                selection-background-color: #b3d7ff;
             }
 
             QSplitter::handle {
-                background: #d8e1ec;
+                background: #e0e0e0;
                 width: 2px;
             }
 
             QTreeView, QTreeWidget, QWebEngineView, QListWidget, QTabWidget::pane {
                 background: white;
-                border: 1px solid #d8e1ec;
-                border-radius: 14px;
+                border: 1px solid #d4d4d4;
+                border-radius: 4px;
             }
 
             QTreeView::item, QTreeWidget::item, QListWidget::item {
-                padding: 6px 4px;
+                padding: 4px 2px;
             }
 
             QTreeView::item:selected, QTreeWidget::item:selected, QListWidget::item:selected {
-                background: #dff8f3;
+                background: #dbeafe;
                 color: #0f172a;
             }
 
             QLabel#panelTitle {
-                color: #475569;
-                font-size: 12px;
+                color: #5a5a5a;
+                font-size: 11px;
                 font-weight: 600;
-                letter-spacing: 1px;
                 text-transform: uppercase;
             }
 
             QLabel#documentTitle, QWidget#searchBar {
-                padding: 12px 14px;
-                border: 1px solid #d8e1ec;
-                border-radius: 14px;
-                background: white;
-                color: #0f172a;
+                padding: 8px 10px;
+                border: 1px solid #d4d4d4;
+                border-radius: 4px;
+                background: #ffffff;
+                color: #202020;
             }
 
             QLabel#documentTitle {
-                font-size: 15px;
-                font-weight: 600;
+                font-size: 13px;
+                font-weight: 500;
             }
 
             QTabBar::tab {
-                padding: 8px 14px;
-                margin-right: 4px;
-                border: 1px solid #d8e1ec;
+                padding: 6px 10px;
+                margin-right: 2px;
+                border: 1px solid #d4d4d4;
                 border-bottom: none;
-                border-top-left-radius: 10px;
-                border-top-right-radius: 10px;
-                background: #f8fbff;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                background: #f3f3f3;
             }
 
             QTabBar::tab:selected {
@@ -419,8 +541,8 @@ class MainWindow(QMainWindow):
             }
 
             QStatusBar {
-                background: #f8fbff;
-                border-top: 1px solid #d8e1ec;
+                background: #f7f7f7;
+                border-top: 1px solid #dddddd;
             }
             """
         )
@@ -513,6 +635,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Open a folder before creating a Markdown file.")
             return
 
+        self._add_markdown_file_at(parent_dir)
+
+    def _add_markdown_file_at(self, parent_dir: Path) -> None:
         file_name, accepted = QInputDialog.getText(
             self,
             "Add Markdown File",
@@ -552,6 +677,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Open a folder before creating a subfolder.")
             return
 
+        self._add_folder_at(parent_dir)
+
+    def _add_folder_at(self, parent_dir: Path) -> None:
         folder_name, accepted = QInputDialog.getText(
             self,
             "Add Folder",
@@ -581,6 +709,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select a file or folder to delete.")
             return
 
+        self._delete_path(target)
+
+    def _delete_path(self, target: Path) -> None:
         resolved_target = target.resolve()
         root = Path(self.file_tree.root_path).resolve() if self.file_tree.root_path else None
         if root is None:
@@ -645,6 +776,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select a file or folder to rename.")
             return
 
+        self._rename_path(target)
+
+    def _rename_path(self, target: Path) -> None:
         resolved_target = target.resolve()
         root = Path(self.file_tree.root_path).resolve() if self.file_tree.root_path else None
         if root is None:
@@ -697,6 +831,37 @@ class MainWindow(QMainWindow):
             self.file_tree.select_file(self.current_file_path)
 
         self.statusBar().showMessage(f"Renamed: {resolved_target.name} -> {destination.name}")
+
+    def _show_file_tree_context_menu(self, pos) -> None:
+        root_path = self.file_tree.root_path
+        if not root_path:
+            return
+
+        clicked_path = self.file_tree.path_at(pos)
+        menu = QMenu(self)
+
+        if clicked_path:
+            self.file_tree.select_path(clicked_path)
+            path = Path(clicked_path)
+            if path.is_dir():
+                menu.addAction("New File", lambda p=path: self._add_markdown_file_at(p))
+                menu.addAction("New Folder", lambda p=path: self._add_folder_at(p))
+                menu.addSeparator()
+                menu.addAction("Rename", lambda p=path: self._rename_path(p))
+                menu.addAction("Delete", lambda p=path: self._delete_path(p))
+            else:
+                menu.addAction("Open", lambda p=path: self.open_markdown_file(str(p.resolve())))
+                menu.addSeparator()
+                menu.addAction("Rename", lambda p=path: self._rename_path(p))
+                menu.addAction("Delete", lambda p=path: self._delete_path(p))
+        else:
+            root = Path(root_path)
+            menu.addAction("New File", lambda p=root: self._add_markdown_file_at(p))
+            menu.addAction("New Folder", lambda p=root: self._add_folder_at(p))
+            menu.addSeparator()
+            menu.addAction("Refresh", self.file_tree.refresh_root)
+
+        menu.exec(self.file_tree.tree.viewport().mapToGlobal(pos))
 
     def editor_panel_focus(self) -> None:
         if self.current_file_path:
@@ -781,7 +946,13 @@ class MainWindow(QMainWindow):
         self.viewer.scroll_to_heading(heading_id)
 
     def _set_view_mode_actions_enabled(self, enabled: bool) -> None:
-        for action in (self.preview_mode_action, self.edit_mode_action, self.edit_only_mode_action):
+        for action in (
+            self.preview_mode_action,
+            self.edit_mode_action,
+            self.edit_only_mode_action,
+            self.preview_mode_menu_action,
+            self.edit_mode_menu_action,
+        ):
             action.setEnabled(enabled)
 
     def _set_view_mode(self, mode: str) -> None:
@@ -813,6 +984,15 @@ class MainWindow(QMainWindow):
             action.setChecked(name == mode)
             action.blockSignals(False)
 
+        menu_action_map = {
+            "preview": self.preview_mode_menu_action,
+            "edit": self.edit_mode_menu_action,
+        }
+        for name, action in menu_action_map.items():
+            action.blockSignals(True)
+            action.setChecked(name == mode)
+            action.blockSignals(False)
+
         if mode in {"edit", "edit_only"} and self.current_file_path:
             self.editor_panel.focus_editor()
             if previous_mode == "preview":
@@ -837,6 +1017,60 @@ class MainWindow(QMainWindow):
             self.editor_panel.set_scroll_ratio(float(ratio))
         finally:
             self._scroll_sync_guard = False
+
+    def _toggle_left_sidebar(self, checked: bool) -> None:
+        self._left_sidebar_visible = checked
+        self._apply_sidebar_visibility()
+
+    def _toggle_right_sidebar(self, checked: bool) -> None:
+        self._right_sidebar_visible = checked
+        self._apply_sidebar_visibility()
+
+    def _apply_sidebar_visibility(self) -> None:
+        current_sizes = self.main_splitter.sizes()
+        if self.file_tree.isVisible() and self.right_tabs.isVisible():
+            self._main_splitter_sizes = current_sizes
+
+        self.file_tree.setVisible(self._left_sidebar_visible)
+        self.right_tabs.setVisible(self._right_sidebar_visible)
+
+        visible_count = int(self._left_sidebar_visible) + 1 + int(self._right_sidebar_visible)
+        if visible_count == 3:
+            self.main_splitter.setSizes(self._main_splitter_sizes)
+        elif visible_count == 2:
+            if self._left_sidebar_visible:
+                self.main_splitter.setSizes([300, 1260, 0])
+            else:
+                self.main_splitter.setSizes([0, 1260, 360])
+        else:
+            self.main_splitter.setSizes([0, 1620, 0])
+
+        self.toggle_left_sidebar_action.blockSignals(True)
+        self.toggle_left_sidebar_action.setChecked(self._left_sidebar_visible)
+        self.toggle_left_sidebar_action.blockSignals(False)
+        self.toggle_right_outline_action.blockSignals(True)
+        self.toggle_right_outline_action.setChecked(self._right_sidebar_visible)
+        self.toggle_right_outline_action.blockSignals(False)
+
+    def _toggle_fullscreen(self, checked: bool) -> None:
+        if checked:
+            self.showFullScreen()
+        else:
+            self.showNormal()
+
+    def _exit_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.fullscreen_action.blockSignals(True)
+            self.fullscreen_action.setChecked(False)
+            self.fullscreen_action.blockSignals(False)
+            self.showNormal()
+
+    def _show_about_dialog(self) -> None:
+        QMessageBox.about(
+            self,
+            "About MDReader",
+            "MDReader\n\nA local offline Markdown reader and editor with preview, search, and file management.",
+        )
 
     def _activate_search(self, mode: str) -> None:
         if mode == "document" and not self.current_file_path:
